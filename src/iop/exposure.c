@@ -328,55 +328,48 @@ static void _deflicker_prepare_histogram(dt_iop_module_t *self, uint32_t **histo
   dt_mipmap_cache_release(darktable.mipmap_cache, &buf);
 }
 
-/* input: 0 - 65535 (valid range: from black level to white level) */
-/* output: -16 ... 0 */
-static double _raw_to_ev(uint32_t raw, uint32_t black_level, uint32_t white_level)
+static double _hist_median(uint32_t bins, uint32_t channel, const uint32_t *const histogram)
 {
-  const uint32_t raw_max = white_level - black_level;
+  uint64_t total = 0;
+  for(uint32_t i = 0; i < bins; i++)
+  {
+    total += histogram[i * 4 + channel];
+  }
 
-  // we are working on data without black clipping,
-  // so we can get values which are lower than the black level !!!
-  const int64_t raw_val = MAX((int64_t)raw - (int64_t)black_level, 1);
+  uint64_t running_total = 0;
+  uint64_t median_value = (total + 1) / 2;
+  for(uint32_t i = 0; i < bins; i++)
+  {
+    if(running_total >= median_value)
+    {
+      return i + (total / 2.0 - running_total) / histogram[i * 4 + channel];
+    }
+    running_total += histogram[i * 4 + channel];
+  }
 
-  const double raw_ev = -log2(raw_max) + log2(raw_val);
-
-  return raw_ev;
+  return bins;
 }
 
 static void _compute_correction(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,
                                 const uint32_t *const histogram,
                                 const dt_dev_histogram_stats_t *const histogram_stats, float *correction)
 {
-  const dt_iop_exposure_params_t *const p = (const dt_iop_exposure_params_t *const)p1;
-
   *correction = NAN;
 
   if(histogram == NULL) return;
 
-  const size_t total = (size_t)histogram_stats->ch * histogram_stats->pixels;
-
-  const double thr
-      = CLAMP(((double)total * (double)p->deflicker_percentile / (double)100.0), 0.0, (double)total);
-
-  size_t n = 0;
-  uint32_t raw = 0;
-
-  for(uint32_t i = 0; i < histogram_stats->bins_count; i++)
-  {
-    for(uint32_t k = 0; k < histogram_stats->ch; k++)
-      n += histogram[4 * i + k];
-
-    if((double)n >= thr)
-    {
-      raw = i;
-      break;
-    }
+  // Average median over number of channels
+  double median = 0;
+  for(uint32_t ch = 0; ch < histogram_stats->ch; ch++) {
+    median += _hist_median(histogram_stats->bins_count, ch, histogram);
   }
+  median /= histogram_stats->ch;
 
-  const double ev
-      = _raw_to_ev(raw, (uint32_t)pipe->dsc.rawprepare.raw_black_level, pipe->dsc.rawprepare.raw_white_point);
+  double relative_position =
+    (median - pipe->dsc.rawprepare.raw_black_level) /
+      (pipe->dsc.rawprepare.raw_white_point - pipe->dsc.rawprepare.raw_black_level);
 
-  *correction = p->deflicker_target_level - ev;
+  *correction = -1.473 * log(relative_position) - 2.7155;
 }
 
 static void _process_common_setup(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece)
